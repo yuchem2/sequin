@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "paths": {
+      "@sequin/shared": ["../shared/src"],
+      "@sequin/shared/*": ["../shared/src/*"]
+    }
+  },
+  "include": ["src"]
+}
