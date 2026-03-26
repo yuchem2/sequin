@@ -11,7 +11,7 @@
     "build": "pnpm --filter @sequin/shared build && pnpm -r build",
     "build:client": "pnpm --filter @sequin/client build",
     "build:server": "pnpm --filter @sequin/server build",
-    "lint": "eslint packages/*/src --fix",
+    "lint": "eslint --fix",
     "format": "prettier --write \"packages/*/src/**/*.{ts,tsx,json,css}\"",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
