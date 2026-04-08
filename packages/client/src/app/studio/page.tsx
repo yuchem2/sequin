@@ -1,399 +1,67 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import type { CSSProperties, ChangeEvent } from "react";
 import * as Tone from "tone";
 
-/* ═══════════════════════════════════════════════
-   TYPES
-   ═══════════════════════════════════════════════ */
-const TRACK_IDS = ["kick", "snare", "hihat", "clap", "bass", "lead", "pad"] as const;
-type TrackId = (typeof TRACK_IDS)[number];
+import type { TrackId } from "@sequin/shared";
+import { TRACK_IDS, TRACK_DEFS, STEPS, SECTION_COLORS, SECTION_TYPES } from "@sequin/shared";
+import { serializeSong, compress } from "@sequin/shared";
 
-interface TrackDef {
-  id: TrackId;
-  name: string;
-  type: "drum" | "melody";
-  color: string;
-  notes?: string[];
-}
-
-interface TrackMix {
-  vol: number;
-  pan: number;
-  mute: boolean;
-  solo: boolean;
-  rev: number;
-  dly: number;
-}
-
-interface MasterMix {
-  vol: number;
-  reverb: number;
-  delay: number;
-  comp: number;
-}
-
-type TrackGrids = { [K in TrackId]: boolean[][] };
-type MixMap = { [K in TrackId]: TrackMix };
-
-interface Pattern {
-  name: string;
-  tracks: TrackGrids;
-}
-interface ArrangementBlock {
-  patIdx: number;
-  section: string;
-  repeats: number;
-}
-
-interface SongState {
-  bpm: number;
-  patterns: Pattern[];
-  arrangement: ArrangementBlock[];
-  mix: MixMap;
-  master: MasterMix;
-}
-
-interface EngineChannels {
-  ch: Tone.Channel;
-  rg: Tone.Gain;
-  dg: Tone.Gain;
-}
-
-interface AudioEngine {
-  synths: {
-    kick: Tone.MembraneSynth;
-    snare: Tone.NoiseSynth;
-    hihat: Tone.MetalSynth;
-    clap: Tone.NoiseSynth;
-    bass: Tone.MonoSynth;
-    lead: Tone.PolySynth;
-    pad: Tone.PolySynth;
-  };
-  channels: { [K in TrackId]: EngineChannels };
-  reverb: Tone.Reverb;
-  delay: Tone.FeedbackDelay;
-  comp: Tone.Compressor;
-  masterVol: Tone.Volume;
-  limiter: Tone.Limiter;
-  analyser: Tone.Analyser;
-  meters: { [K in TrackId]: Tone.Meter };
-  masterMeter: Tone.Meter;
-}
-
-interface SerializedSong {
-  v: number;
-  b: number;
-  p: { n: string; t: Record<string, number[]> }[];
-  a: { p: number; s: string; r: number }[];
-  m: MixMap;
-  ms: MasterMix;
-}
-
-/* ═══════════════════════════════════════════════
-   CONSTANTS
-   ═══════════════════════════════════════════════ */
-const STEPS = 16;
-
-const TRACK_DEFS: TrackDef[] = [
-  { id: "kick", name: "KCK", type: "drum", color: "#E8443A" },
-  { id: "snare", name: "SNR", type: "drum", color: "#E8923A" },
-  { id: "hihat", name: "HHT", type: "drum", color: "#3AE8A0" },
-  { id: "clap", name: "CLP", type: "drum", color: "#3A9BE8" },
-  {
-    id: "bass",
-    name: "BAS",
-    type: "melody",
-    color: "#A83AE8",
-    notes: ["C3", "B2", "A2", "G2", "F2", "E2", "D2", "C2"],
-  },
-  {
-    id: "lead",
-    name: "LED",
-    type: "melody",
-    color: "#E83AA8",
-    notes: ["C5", "B4", "A4", "G4", "F4", "E4", "D4", "C4"],
-  },
-  {
-    id: "pad",
-    name: "PAD",
-    type: "melody",
-    color: "#3AE8E8",
-    notes: ["C5", "B4", "A4", "G4", "F4", "E4", "D4", "C4"],
-  },
-];
-
-const SECTION_COLORS: Record<string, string> = {
-  intro: "#3A9BE8",
-  verse: "#3AE8A0",
-  chorus: "#E8443A",
-  bridge: "#A83AE8",
-  drop: "#E8923A",
-  outro: "#666",
-  prechorus: "#E83AA8",
-};
-const SECTION_TYPES = Object.keys(SECTION_COLORS);
-
-const BASS_NOTES = ["C3", "B2", "A2", "G2", "F2", "E2", "D2", "C2"] as const;
-const LEAD_NOTES = ["C5", "B4", "A4", "G4", "F4", "E4", "D4", "C4"] as const;
-const PAD_NOTES = ["C5", "B4", "A4", "G4", "F4", "E4", "D4", "C4"] as const;
-
-/* ═══ Compression ═══ */
-function compress(str: string): string {
-  try {
-    const bytes = new TextEncoder().encode(str);
-    return btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(""))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
-  } catch {
-    return "";
-  }
-}
-
-function decompress(encoded: string): string {
-  try {
-    const b64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
-    const bin = atob(b64);
-    return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
-  } catch {
-    return "";
-  }
-}
-
-/* ═══ Serialization ═══ */
-function packRow(row: boolean[]): number {
-  let b = 0;
-  row.forEach((v, i) => {
-    if (v) b |= 1 << i;
-  });
-  return b;
-}
-
-function unpackRow(bits: number, len = STEPS): boolean[] {
-  return Array.from({ length: len }, (_, i) => !!(bits & (1 << i)));
-}
-
-function serializeSong(song: SongState): string {
-  const pk: SerializedSong = {
-    v: 2,
-    b: song.bpm,
-    p: song.patterns.map((p) => ({ n: p.name, t: {} })),
-    a: song.arrangement.map((s) => ({ p: s.patIdx, s: s.section, r: s.repeats || 1 })),
-    m: song.mix,
-    ms: song.master,
-  };
-  song.patterns.forEach((pat, pi) => {
-    for (const id of TRACK_IDS) {
-      const rows = pat.tracks[id].map(packRow);
-      if (rows.some((r) => r !== 0)) pk.p[pi]!.t[id] = rows;
-    }
-  });
-  return JSON.stringify(pk);
-}
-
-function deserializeSong(str: string): SongState | null {
-  try {
-    const d = JSON.parse(str) as SerializedSong;
-    if (d.v !== 2) return null;
-    const patterns: Pattern[] = d.p.map((pp) => {
-      const tracks = emptyTracks();
-      for (const id of TRACK_IDS) {
-        const saved = pp.t[id];
-        if (saved) tracks[id] = saved.map((b) => unpackRow(b));
-      }
-      return { name: pp.n, tracks };
-    });
-    return {
-      bpm: d.b,
-      patterns,
-      arrangement: d.a.map((s) => ({ patIdx: s.p, section: s.s, repeats: s.r || 1 })),
-      mix: d.m,
-      master: d.ms,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/* ═══ Defaults ═══ */
-function emptyTracks(): TrackGrids {
-  return {
-    kick: [Array(STEPS).fill(false) as boolean[]],
-    snare: [Array(STEPS).fill(false) as boolean[]],
-    hihat: [Array(STEPS).fill(false) as boolean[]],
-    clap: [Array(STEPS).fill(false) as boolean[]],
-    bass: Array.from({ length: 8 }, () => Array(STEPS).fill(false) as boolean[]),
-    lead: Array.from({ length: 8 }, () => Array(STEPS).fill(false) as boolean[]),
-    pad: Array.from({ length: 8 }, () => Array(STEPS).fill(false) as boolean[]),
-  };
-}
-
-function defaultMix(): MixMap {
-  const m = { vol: 80, pan: 0, mute: false, solo: false, rev: 0, dly: 0 };
-  return {
-    kick: { ...m },
-    snare: { ...m },
-    hihat: { ...m },
-    clap: { ...m },
-    bass: { ...m },
-    lead: { ...m },
-    pad: { ...m },
-  };
-}
-
-function defaultSong(): SongState {
-  return {
-    bpm: 120,
-    patterns: [{ name: "A", tracks: emptyTracks() }],
-    arrangement: [{ patIdx: 0, section: "verse", repeats: 4 }],
-    mix: defaultMix(),
-    master: { vol: 85, reverb: 25, delay: 15, comp: 40 },
-  };
-}
-
-/* ═══ Audio Engine ═══ */
-function buildEngine(): AudioEngine {
-  const comp = new Tone.Compressor({ threshold: -16, ratio: 5, attack: 0.002, release: 0.2 });
-  const masterVol = new Tone.Volume(0);
-  const limiter = new Tone.Limiter(-0.5);
-  const reverb = new Tone.Reverb({ decay: 2.8, wet: 1 }).connect(comp);
-  const delay = new Tone.FeedbackDelay({ delayTime: "8n.", feedback: 0.25, wet: 1 }).connect(comp);
-  comp.connect(masterVol);
-  masterVol.connect(limiter);
-  limiter.toDestination();
-
-  const mkCh = () => {
-    const ch = new Tone.Channel({ volume: 0, pan: 0 }).connect(comp);
-    const rg = new Tone.Gain(0).connect(reverb);
-    const dg = new Tone.Gain(0).connect(delay);
-    ch.connect(rg);
-    ch.connect(dg);
-    return { ch, rg, dg };
-  };
-
-  const channels: AudioEngine["channels"] = {
-    kick: mkCh(),
-    snare: mkCh(),
-    hihat: mkCh(),
-    clap: mkCh(),
-    bass: mkCh(),
-    lead: mkCh(),
-    pad: mkCh(),
-  };
-
-  const kick = new Tone.MembraneSynth({
-    pitchDecay: 0.04,
-    octaves: 7,
-    oscillator: { type: "sine" },
-    envelope: { attack: 0.001, decay: 0.35, sustain: 0.01, release: 0.3 },
-  }).connect(channels.kick.ch);
-  const snare = new Tone.NoiseSynth({
-    noise: { type: "white" },
-    envelope: { attack: 0.001, decay: 0.16, sustain: 0, release: 0.1 },
-  }).connect(channels.snare.ch);
-  const hihat = new Tone.MetalSynth({
-    envelope: { attack: 0.001, decay: 0.05, release: 0.008 },
-    harmonicity: 5.1,
-    modulationIndex: 32,
-    resonance: 4500,
-    octaves: 1.5,
-  }).connect(channels.hihat.ch);
-  hihat.volume.value = -12;
-  const clap = new Tone.NoiseSynth({
-    noise: { type: "pink" },
-    envelope: { attack: 0.004, decay: 0.13, sustain: 0, release: 0.07 },
-  }).connect(channels.clap.ch);
-  const bass = new Tone.MonoSynth({
-    oscillator: { type: "sawtooth" },
-    filter: { Q: 3, type: "lowpass", rolloff: -24 },
-    envelope: { attack: 0.008, decay: 0.25, sustain: 0.5, release: 0.2 },
-    filterEnvelope: {
-      attack: 0.015,
-      decay: 0.15,
-      sustain: 0.2,
-      release: 0.2,
-      baseFrequency: 80,
-      octaves: 3,
-    },
-  }).connect(channels.bass.ch);
-  bass.volume.value = -3;
-  const lead = new Tone.PolySynth(Tone.Synth, {
-    oscillator: { type: "square8" },
-    envelope: { attack: 0.015, decay: 0.2, sustain: 0.25, release: 0.4 },
-  }).connect(channels.lead.ch);
-  lead.volume.value = -5;
-  const pad = new Tone.PolySynth(Tone.Synth, {
-    oscillator: { type: "sine" },
-    envelope: { attack: 0.5, decay: 0.6, sustain: 0.7, release: 1.5 },
-  }).connect(channels.pad.ch);
-  pad.volume.value = -10;
-
-  const synths: AudioEngine["synths"] = { kick, snare, hihat, clap, bass, lead, pad };
-  const analyser = new Tone.Analyser("waveform", 256);
-  limiter.connect(analyser);
-
-  const mkMeter = (id: TrackId) => {
-    const m = new Tone.Meter({ smoothing: 0.8 });
-    channels[id].ch.connect(m);
-    return m;
-  };
-  const meters: AudioEngine["meters"] = {
-    kick: mkMeter("kick"),
-    snare: mkMeter("snare"),
-    hihat: mkMeter("hihat"),
-    clap: mkMeter("clap"),
-    bass: mkMeter("bass"),
-    lead: mkMeter("lead"),
-    pad: mkMeter("pad"),
-  };
-  const masterMeter = new Tone.Meter({ smoothing: 0.8 });
-  limiter.connect(masterMeter);
-
-  return {
-    synths,
-    channels,
-    reverb,
-    delay,
-    comp,
-    masterVol,
-    limiter,
-    analyser,
-    meters,
-    masterMeter,
-  };
-}
+import { buildEngine, playStep } from "@/engine";
+import type { AudioEngine } from "@/engine";
+import { useSongStore } from "@/store/songStore";
+import { useUiStore } from "@/store/uiStore";
 
 /* ═══════════════════════════════════════════════
    COMPONENT
    ═══════════════════════════════════════════════ */
-function getInitialSong(): SongState {
-  if (typeof window === "undefined") return defaultSong();
-  const hash = window.location.hash.slice(1);
-  if (hash) {
-    const json = decompress(hash);
-    const loaded = deserializeSong(json);
-    if (loaded) return loaded;
-  }
-  return defaultSong();
-}
-
 export default function StudioPage() {
-  const [song, setSong] = useState<SongState>(getInitialSong);
-  const [activePatIdx, setActivePatIdx] = useState(0);
-  const [activeTrack, setActiveTrack] = useState<TrackId>("kick");
-  const [tab, setTab] = useState("seq");
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [playMode, setPlayMode] = useState("song");
-  const [currentStep, setCurrentStep] = useState(-1);
-  const [currentArrIdx, setCurrentArrIdx] = useState(-1);
-  const [initialized, setInitialized] = useState(false);
-  const [shareMsg, setShareMsg] = useState("");
-  const [trackMeters, setTrackMeters] = useState<Partial<Record<TrackId, number>>>({});
-  const [masterLevel, setMasterLevel] = useState(-60);
-  const [songProgress, setSongProgress] = useState(0);
+  /* ── Stores ── */
+  const {
+    song,
+    toggleCell,
+    setMixVal,
+    setMasterVal,
+    addPattern,
+    dupPattern,
+    addArrBlock,
+    removeArrBlock,
+    setArrSection,
+    setArrRepeats,
+    moveArrBlock,
+    clearAll,
+    updateSong,
+  } = useSongStore();
 
+  const {
+    activePatIdx,
+    setActivePatIdx,
+    activeTrack,
+    setActiveTrack,
+    tab,
+    setTab,
+    isPlaying,
+    setIsPlaying,
+    playMode,
+    setPlayMode,
+    currentStep,
+    setCurrentStep,
+    currentArrIdx,
+    setCurrentArrIdx,
+    initialized,
+    setInitialized,
+    shareMsg,
+    setShareMsg,
+    trackMeters,
+    setTrackMeters,
+    masterLevel,
+    setMasterLevel,
+    songProgress,
+    setSongProgress,
+  } = useUiStore();
+
+  /* ── Refs ── */
   const engineRef = useRef<AudioEngine | null>(null);
   const songRef = useRef(song);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -402,7 +70,7 @@ export default function StudioPage() {
 
   const pat = song.patterns[activePatIdx] ?? song.patterns[0]!;
 
-  // URL sync
+  /* ── URL sync ── */
   useEffect(() => {
     const t = setTimeout(() => {
       const encoded = compress(serializeSong(song));
@@ -411,15 +79,15 @@ export default function StudioPage() {
     return () => clearTimeout(t);
   }, [song]);
 
-  // Init audio
+  /* ── Init audio ── */
   const initAudio = useCallback(async () => {
     if (initialized) return;
     await Tone.start();
     engineRef.current = buildEngine();
     setInitialized(true);
-  }, [initialized]);
+  }, [initialized, setInitialized]);
 
-  // Sync mix
+  /* ── Sync mix ── */
   useEffect(() => {
     const e = engineRef.current;
     if (!e) return;
@@ -443,7 +111,7 @@ export default function StudioPage() {
     Tone.getTransport().bpm.value = song.bpm;
   }, [song.bpm]);
 
-  // Waveform draw
+  /* ── Waveform draw ── */
   const drawLoop = useCallback(() => {
     const c = canvasRef.current;
     const e = engineRef.current;
@@ -484,7 +152,7 @@ export default function StudioPage() {
     setTrackMeters(lvl);
     setMasterLevel(e.masterMeter.getValue() as number);
     animRef.current = requestAnimationFrame(drawLoop);
-  }, []);
+  }, [setTrackMeters, setMasterLevel]);
 
   useEffect(() => {
     if (isPlaying && initialized) animRef.current = requestAnimationFrame(drawLoop);
@@ -497,26 +165,7 @@ export default function StudioPage() {
     return () => cancelAnimationFrame(animRef.current);
   }, [isPlaying, initialized, drawLoop]);
 
-  // Playback
-  const playStep = (e: AudioEngine, tracks: TrackGrids, s: number, time: number) => {
-    if (tracks.kick[0]?.[s]) e.synths.kick.triggerAttackRelease("C1", "8n", time);
-    if (tracks.snare[0]?.[s]) e.synths.snare.triggerAttackRelease("8n", time);
-    if (tracks.hihat[0]?.[s]) e.synths.hihat.triggerAttackRelease("32n", time, 0.4);
-    if (tracks.clap[0]?.[s]) e.synths.clap.triggerAttackRelease("16n", time);
-    const bi = tracks.bass.findIndex((r) => r[s]);
-    if (bi !== -1) e.synths.bass.triggerAttackRelease(BASS_NOTES[bi]!, "16n", time);
-    const ln: string[] = [];
-    tracks.lead.forEach((r, i) => {
-      if (r[s]) ln.push(LEAD_NOTES[i]!);
-    });
-    if (ln.length) e.synths.lead.triggerAttackRelease(ln, "16n", time);
-    const pn: string[] = [];
-    tracks.pad.forEach((r, i) => {
-      if (r[s]) pn.push(PAD_NOTES[i]!);
-    });
-    if (pn.length) e.synths.pad.triggerAttackRelease(pn, "8n", time);
-  };
-
+  /* ── Playback ── */
   const togglePlay = async () => {
     await initAudio();
     if (isPlaying) {
@@ -570,77 +219,7 @@ export default function StudioPage() {
     setIsPlaying(true);
   };
 
-  // Mutations
-  const updateSong = (fn: (s: SongState) => void) =>
-    setSong((prev) => {
-      const next: SongState = JSON.parse(JSON.stringify(prev));
-      fn(next);
-      return next;
-    });
-
-  const toggleCell = (tid: TrackId, row: number, col: number) =>
-    updateSong((s) => {
-      const r = s.patterns[activePatIdx]?.tracks[tid][row];
-      if (r) r[col] = !r[col];
-    });
-
-  const setMixVal = (tid: TrackId, k: string, v: number | boolean) =>
-    updateSong((s) => {
-      (s.mix[tid] as unknown as Record<string, number | boolean>)[k] = v;
-    });
-
-  const setMasterVal = (k: keyof MasterMix, v: number) =>
-    updateSong((s) => {
-      s.master[k] = v;
-    });
-
-  const addPattern = () => {
-    if (song.patterns.length >= 12) return;
-    updateSong((s) => {
-      s.patterns.push({ name: String.fromCharCode(65 + s.patterns.length), tracks: emptyTracks() });
-    });
-    setActivePatIdx(song.patterns.length);
-  };
-
-  const dupPattern = () => {
-    if (song.patterns.length >= 12) return;
-    updateSong((s) => {
-      s.patterns.push({
-        name: String.fromCharCode(65 + s.patterns.length),
-        tracks: JSON.parse(JSON.stringify(pat.tracks)),
-      });
-    });
-    setActivePatIdx(song.patterns.length);
-  };
-
-  const addArrBlock = (pi: number) =>
-    updateSong((s) => {
-      s.arrangement.push({ patIdx: pi, section: "verse", repeats: 1 });
-    });
-  const removeArrBlock = (i: number) =>
-    updateSong((s) => {
-      if (s.arrangement.length > 1) s.arrangement.splice(i, 1);
-    });
-  const setArrSection = (i: number, sec: string) =>
-    updateSong((s) => {
-      const b = s.arrangement[i];
-      if (b) b.section = sec;
-    });
-  const setArrRepeats = (i: number, r: number) =>
-    updateSong((s) => {
-      const b = s.arrangement[i];
-      if (b) b.repeats = Math.max(1, Math.min(16, r));
-    });
-  const moveArrBlock = (i: number, d: number) =>
-    updateSong((s) => {
-      const ni = i + d;
-      if (ni < 0 || ni >= s.arrangement.length) return;
-      const a = s.arrangement[i]!,
-        b = s.arrangement[ni]!;
-      s.arrangement[i] = b;
-      s.arrangement[ni] = a;
-    });
-
+  /* ── Actions ── */
   const shareURL = () => {
     navigator.clipboard
       .writeText(window.location.href)
@@ -650,12 +229,13 @@ export default function StudioPage() {
       })
       .catch(() => setShareMsg("주소창에서 복사"));
   };
-  const clearAll = () => {
-    setSong(defaultSong());
+
+  const handleClearAll = () => {
+    clearAll();
     setActivePatIdx(0);
   };
 
-  // Helpers
+  /* ── Helpers ── */
   const trkDef = TRACK_DEFS.find((t) => t.id === activeTrack)!;
   const isMelody = trkDef.type === "melody";
   const grid = pat.tracks[activeTrack];
@@ -795,7 +375,7 @@ export default function StudioPage() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <button
-            onClick={clearAll}
+            onClick={handleClearAll}
             className="hbtn"
             style={{ ...hBtn, fontSize: 7, padding: "3px 6px" }}
           >
@@ -934,12 +514,21 @@ export default function StudioPage() {
               </button>
             ))}
             <button
-              onClick={addPattern}
+              onClick={() => {
+                addPattern();
+                setActivePatIdx(song.patterns.length);
+              }}
               style={{ ...tBtn, width: 26, height: 26, borderStyle: "dashed" as const }}
             >
               +
             </button>
-            <button onClick={dupPattern} style={{ ...tBtn, width: 26, height: 26, fontSize: 7 }}>
+            <button
+              onClick={() => {
+                dupPattern(activePatIdx);
+                setActivePatIdx(song.patterns.length);
+              }}
+              style={{ ...tBtn, width: 26, height: 26, fontSize: 7 }}
+            >
               ⊕
             </button>
           </div>
@@ -1018,7 +607,7 @@ export default function StudioPage() {
                   return (
                     <div
                       key={col}
-                      onClick={() => toggleCell(activeTrack, row, col)}
+                      onClick={() => toggleCell(activePatIdx, activeTrack, row, col)}
                       style={{
                         width: 29,
                         height: isMelody ? 18 : 29,
