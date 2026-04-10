@@ -4,10 +4,96 @@
 // Get a free hosted Postgres database in seconds: `npx create-db`
 
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
   output   = "../src/generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  username     String   @unique
+  displayName  String?
+  avatarUrl    String?
+  provider     String
+  providerId   String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  songs        Song[]
+  likes        Like[]
+  comments     Comment[]
+  followers    Follow[] @relation("following")
+  following    Follow[] @relation("follower")
+
+  @@unique([provider, providerId])
+}
+
+model Song {
+  id           String   @id @default(uuid())
+  userId       String
+  title        String   @default("Untitled")
+  data         Json                          // 시퀀서 데이터
+  liveCode     String?                       // ★ Live Coding 소스 코드
+  bpm          Int      @default(120)
+  genre        String?
+  tags         String[] @default([])
+  isPublic     Boolean  @default(false)
+  plays        Int      @default(0)
+  likesCount   Int      @default(0)
+  forksCount   Int      @default(0)          // ★ Fork 수 카운트
+  exportUrl    String?
+  duration     Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  likes        Like[]
+  comments     Comment[]
+  forks        Song[]   @relation("ForkRelation")
+  forkedFrom   Song?    @relation("ForkRelation", fields: [forkedFromId], references: [id])
+  forkedFromId String?
+
+  @@index([userId])
+  @@index([isPublic, likesCount(sort: Desc)])
+  @@index([isPublic, createdAt(sort: Desc)])
+  @@index([forkedFromId])                    // ★ Fork 트리 조회용
+}
+
+model Like {
+  userId    String
+  songId    String
+  createdAt DateTime @default(now())
+
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  song      Song @relation(fields: [songId], references: [id], onDelete: Cascade)
+
+  @@id([userId, songId])
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  songId    String
+  userId    String
+  content   String
+  createdAt DateTime @default(now())
+
+  song      Song @relation(fields: [songId], references: [id], onDelete: Cascade)
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([songId, createdAt(sort: Desc)])
+}
+
+model Follow {
+  followerId  String
+  followingId String
+  createdAt   DateTime @default(now())
+
+  follower    User @relation("follower", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User @relation("following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followingId])
 }
