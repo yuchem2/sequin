@@ -50,8 +50,8 @@ export interface SongState {
 export interface SerializedSong {
   v: number;
   b: number;
-  p: { n: string; t: Record<string, number[]> }[];
-  a: { p: number; s: string; r: number }[];
-  m: MixMap;
-  ms: MasterMix;
+  p: { n: string; t: Partial<Record<TrackId, number[]>> }[];
+  a: { p: number; s?: string; r?: number }[];
+  m?: Partial<Record<TrackId, Partial<TrackMix>>>;
+  ms?: Partial<MasterMix>;
 }
